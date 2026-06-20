@@ -1,0 +1,17 @@
+[Unit]
+Description=Tapping Box - POS Quinos transaction collector (Bapenda)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tapping-box
+ExecStart=/usr/bin/python3 -m tapping_box run -c /opt/tapping-box/config.toml
+Restart=always
+RestartSec=10
+# keamanan ringan
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

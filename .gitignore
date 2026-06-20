@@ -1,0 +1,16 @@
+# Rahasia & state lokal — JANGAN commit
+config.toml
+*.pem
+ssh_key
+ssh_key.pub
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/

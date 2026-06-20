@@ -1,0 +1,64 @@
+# =====================================================================
+# config.toml — Tapping Box (POS Quinos -> trumon.FileTransferStage2)
+# chmod 600 file ini. Sesuaikan semua nilai bertanda WAJIB.
+# =====================================================================
+
+[source]                      # DB Quinos di PC kasir (diakses via LAN)
+host = "192.168.1.50"         # WAJIB: IP PC kasir (DB harus listen & izinkan remote)
+port = 3306
+user = "root"                 # WAJIB
+password = "CHANGE_ME"        # WAJIB
+database = "quinos"           # WAJIB
+
+# --- Pemetaan skema Quinos ---
+# WAJIB DIVERIFIKASI: jalankan di DB Quinos:
+#   DESCRIBE <tabel_transaksi>;  dan  DESCRIBE <tabel_item>;
+# lalu samakan nama kolom di bawah. Ini default tebakan, hampir pasti perlu diubah.
+[source.schema]
+txn_table  = "transaction"        # tabel header transaksi
+txn_id     = "id"                 # PK -> FileIdentifier & watermark (harus numerik/urut)
+txn_no     = "trx_no"             # "No Transaksi"
+txn_time   = "created_at"         # datetime transaksi
+table_no   = "table_no"           # "Meja"
+cashier    = "cashier_name"       # "Kasir"
+subtotal   = "subtotal"
+service    = "service_charge"
+tax        = "tax"
+total      = "grand_total"
+pay_method = "payment_method"     # mis. "Cash"
+paid       = "paid_amount"
+change     = "change_amount"
+item_table = "transaction_item"   # tabel detail item
+item_fk    = "transaction_id"     # FK ke txn_id
+item_qty   = "qty"
+item_name  = "product_name"
+item_price = "price"              # harga satuan
+item_total = "line_total"         # boleh "" -> dihitung qty*price
+
+[central]                     # DB pusat trumon (diakses via tunnel -> 127.0.0.1)
+host = "127.0.0.1"
+port = 3306
+user = "CHANGE_ME"
+password = "CHANGE_ME"
+database = "trumon"
+
+[ssh]                         # SSH tunnel ke server pusat (KEY AUTH)
+host = "CHANGE_ME"            # WAJIB: isi IP/hostname server pusat (jangan commit nilai asli)
+port = 22
+user = "CHANGE_ME"
+key_path = "/opt/tapping-box/ssh_key"   # public key-nya didaftarkan di authorized_keys server
+remote_bind_host = "127.0.0.1"
+remote_bind_port = 3306
+
+[device]
+npwp = "00.000.000.0-000.000"           # WAJIB: NPWP -> DeviceId
+nama_wp = "Nama Wajib Pajak"             # untuk FileName "{nama_wp}_{timestamp}"
+struk_header = ["tes", "jln jln", "50"]  # 3 baris header struk (nama/alamat/dll)
+
+[runtime]
+poll_interval_sec = 60        # jeda antar siklus
+batch_size = 100              # maksimum transaksi diproses per siklus
+retention_days = 90           # baris 'sent' lebih tua dari ini dihapus dari SQLite
+remote_dedup_guard = true     # cek eksistensi di pusat sebelum insert (aman thd reinstall)
+sqlite_path = "/opt/tapping-box/data/outbox.db"
+rescan_window = 5             # mundur N id dari watermark sbg jaring pengaman
