@@ -65,7 +65,18 @@ cp -r "$SRC_DIR/tapping_box" "$APP_DIR/"
 
 echo "==> [7/8] Kunci SSH untuk tunnel"
 if [[ ! -f "$KEY_PATH" ]]; then
-  ssh-keygen -t ed25519 -N "" -C "tapping-box@$(hostname)" -f "$KEY_PATH"
+  if command -v ssh-keygen >/dev/null 2>&1; then
+    ssh-keygen -t ed25519 -N "" -C "tapping-box@$(hostname)" -f "$KEY_PATH"
+  else
+    echo ""
+    echo "GAGAL: ssh-keygen tidak ada di board (image Yocto ini minimal)."
+    echo "Generate key pair di mesin LAIN yang punya ssh-keygen, lalu salin:"
+    echo "  ssh-keygen -t ed25519 -N \"\" -f ssh_key"
+    echo "Lalu taruh isi file 'ssh_key' (private) di: $KEY_PATH"
+    echo "dan isi file 'ssh_key.pub' (public) di:      $KEY_PATH.pub"
+    echo "Setelah itu jalankan ulang: chmod 600 $KEY_PATH && $0"
+    exit 1
+  fi
 fi
 chmod 600 "$KEY_PATH" "$APP_DIR/config.toml"
 
