@@ -1,94 +1,82 @@
-"""Pemuat & validasi konfigurasi dari config.toml."""
+"""Pemuat & validasi konfigurasi dari config.toml (kompatibel Python 3.5).
+
+Catatan: tomllib (stdlib) butuh Python 3.11+, tidak tersedia di 3.5.
+Pakai 'toml' package (pure-Python, pip install toml) sbg gantinya.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List
-
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore
+import toml
 
 
-@dataclass(frozen=True)
-class SourceSchema:
+class SourceSchema(object):
     """Pemetaan nama tabel/kolom DB Quinos. WAJIB diverifikasi via DESCRIBE."""
-    txn_table: str
-    txn_id: str
-    txn_no: str
-    txn_time: str
-    table_no: str
-    cashier: str
-    subtotal: str
-    service: str
-    tax: str
-    total: str
-    pay_method: str
-    paid: str
-    change: str
-    item_table: str
-    item_fk: str
-    item_qty: str
-    item_name: str
-    item_price: str
-    item_total: str  # boleh "" -> dihitung qty*price
+    FIELDS = (
+        "txn_table", "txn_id", "txn_no", "txn_time", "table_no", "cashier",
+        "subtotal", "service", "tax", "total", "pay_method", "paid", "change",
+        "item_table", "item_fk", "item_qty", "item_name", "item_price", "item_total",
+    )
+
+    def __init__(self, **kw):
+        for f in self.FIELDS:
+            setattr(self, f, kw.get(f, ""))
 
 
-@dataclass(frozen=True)
-class DbConn:
-    host: str
-    port: int
-    user: str
-    password: str
-    database: str
+class DbConn(object):
+    def __init__(self, host, port, user, password, database):
+        self.host = host
+        self.port = port
+        self.user = user
+        self.password = password
+        self.database = database
 
 
-@dataclass(frozen=True)
-class SshTunnel:
-    host: str
-    port: int
-    user: str
-    key_path: str
-    remote_bind_host: str
-    remote_bind_port: int
+class SshTunnelCfg(object):
+    def __init__(self, host, port, user, key_path, remote_bind_host, remote_bind_port):
+        self.host = host
+        self.port = port
+        self.user = user
+        self.key_path = key_path
+        self.remote_bind_host = remote_bind_host
+        self.remote_bind_port = remote_bind_port
 
 
-@dataclass(frozen=True)
-class Device:
-    npwp: str               # DeviceId
-    nama_wp: str            # untuk FileName
-    struk_header: List[str] # 3 baris header struk (nama/alamat/dll)
+class Device(object):
+    def __init__(self, npwp, nama_wp, struk_header):
+        self.npwp = npwp                  # DeviceId
+        self.nama_wp = nama_wp            # untuk FileName
+        self.struk_header = struk_header  # 3 baris header struk
 
 
-@dataclass(frozen=True)
-class Runtime:
-    poll_interval_sec: int
-    batch_size: int
-    retention_days: int
-    remote_dedup_guard: bool
-    sqlite_path: str
-    rescan_window: int      # mundur N id dari watermark sbg jaring pengaman
+class Runtime(object):
+    def __init__(self, poll_interval_sec, batch_size, retention_days,
+                 remote_dedup_guard, sqlite_path, rescan_window):
+        self.poll_interval_sec = poll_interval_sec
+        self.batch_size = batch_size
+        self.retention_days = retention_days
+        self.remote_dedup_guard = remote_dedup_guard
+        self.sqlite_path = sqlite_path
+        self.rescan_window = rescan_window  # mundur N id dari watermark sbg jaring pengaman
 
 
-@dataclass(frozen=True)
-class Config:
-    source: DbConn
-    schema: SourceSchema
-    central: DbConn
-    ssh: SshTunnel
-    device: Device
-    runtime: Runtime
+class Config(object):
+    def __init__(self, source, schema, central, ssh, device, runtime):
+        self.source = source
+        self.schema = schema
+        self.central = central
+        self.ssh = ssh
+        self.device = device
+        self.runtime = runtime
 
 
-def _req(d: Dict[str, Any], key: str, ctx: str) -> Any:
+def _req(d, key, ctx):
     if key not in d:
-        raise ValueError(f"[{ctx}] kunci wajib hilang: '{key}'")
+        raise ValueError("[{}] kunci wajib hilang: '{}'".format(ctx, key))
     return d[key]
 
 
-def load_config(path: str | Path) -> Config:
-    raw = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+def load_config(path):
+    with open(str(path), "r") as fh:
+        raw = toml.load(fh)
 
     src = _req(raw, "source", "config")
     sch = _req(src, "schema", "source")
@@ -99,10 +87,10 @@ def load_config(path: str | Path) -> Config:
 
     cfg = Config(
         source=DbConn(src["host"], int(src["port"]), src["user"], src["password"], src["database"]),
-        schema=SourceSchema(**{k: sch.get(k, "") for k in SourceSchema.__annotations__}),
+        schema=SourceSchema(**sch),
         central=DbConn(ctr["host"], int(ctr["port"]), ctr["user"], ctr["password"], ctr["database"]),
-        ssh=SshTunnel(ssh["host"], int(ssh["port"]), ssh["user"], ssh["key_path"],
-                      ssh["remote_bind_host"], int(ssh["remote_bind_port"])),
+        ssh=SshTunnelCfg(ssh["host"], int(ssh["port"]), ssh["user"], ssh["key_path"],
+                         ssh["remote_bind_host"], int(ssh["remote_bind_port"])),
         device=Device(dev["npwp"], dev["nama_wp"], list(dev["struk_header"])),
         runtime=Runtime(
             int(rt["poll_interval_sec"]), int(rt["batch_size"]), int(rt["retention_days"]),

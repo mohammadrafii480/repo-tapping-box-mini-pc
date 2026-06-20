@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# install.sh — pasang Tapping Box di MYIR MYD-C8MMX-V2 (Yocto sumo, aarch64).
-# Tidak ada apt/gcc/pip bawaan -> pip dipasang via get-pip.py, lalu cek wheel
-# cryptography (kanari): kalau pip mencoba compile (tak ada gcc), instalasi
-# berhenti SEBELUM merusak state, dengan pesan jelas.
+# install.sh — pasang Tapping Box di MYIR MYD-C8MMX-V2 (Yocto sumo, aarch64,
+# Python 3.5.5 — interpreter EOL, banyak tooling modern tidak kompatibel).
 # Idempotent: aman dijalankan ulang. Wajib root: sudo ./install.sh
+# Set ZT_NETWORK_ID untuk auto-join ZeroTier, mis:
+#   sudo ZT_NETWORK_ID=8056c2e21c000001 ./install.sh
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -12,51 +12,41 @@ APP_DIR=/opt/tapping-box
 KEY_PATH="$APP_DIR/ssh_key"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 ZT_NETWORK_ID="${ZT_NETWORK_ID:-}"
-PIP_BIN="python3 -m pip"
+PY_BIN=python3
 
 [[ $EUID -eq 0 ]] || { echo "Jalankan sebagai root."; exit 1; }
 
 echo "==> [1/8] Cek prasyarat dasar"
-command -v python3 >/dev/null || { echo "python3 tidak ditemukan."; exit 1; }
-command -v curl >/dev/null || command -v wget >/dev/null || { echo "curl/wget tidak ada."; exit 1; }
+command -v "$PY_BIN" >/dev/null || { echo "python3 tidak ditemukan."; exit 1; }
+PY_VER="$("$PY_BIN" -c 'import sys; print("%d.%d"%sys.version_info[:2])')"
+echo "    python3 = $PY_VER"
+command -v curl >/dev/null || { echo "curl tidak ada."; exit 1; }
 ARCH="$(uname -m)"
 [[ "$ARCH" == "aarch64" ]] || echo "PERINGATAN: arch=$ARCH, skrip ini ditarget aarch64."
+command -v ssh >/dev/null || { echo "ssh (OpenSSH client) tidak ada — wajib utk tunnel."; exit 1; }
 
-echo "==> [2/8] Pasang pip (get-pip.py) bila belum ada"
-if ! python3 -m pip --version >/dev/null 2>&1; then
-  curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py \
-    || wget -qO /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py
-  python3 /tmp/get-pip.py --no-cache-dir
+echo "==> [2/8] Pasang pip (get-pip.py terkunci ke versi Python ini) bila belum ada"
+if ! "$PY_BIN" -m pip --version >/dev/null 2>&1; then
+  GETPIP_URL="https://bootstrap.pypa.io/pip/${PY_VER}/get-pip.py"
+  if ! curl -sSLf "$GETPIP_URL" -o /tmp/get-pip.py; then
+    echo "    URL terkunci versi ($GETPIP_URL) tidak ada, coba get-pip.py generik..."
+    curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+  fi
+  "$PY_BIN" /tmp/get-pip.py --no-cache-dir "pip<21.0"
   rm -f /tmp/get-pip.py
 fi
-python3 -m pip install --upgrade pip --no-cache-dir
-echo "    pip: $(python3 -m pip --version)"
+echo "    pip: $("$PY_BIN" -m pip --version)"
 
-echo "==> [3/8] Kanari: pastikan 'cryptography' tersedia sbg wheel (tanpa compile)"
-# --only-binary memaksa pip GAGAL (bukan fallback compile) kalau tak ada wheel cocok.
-# Ini sengaja: lebih baik gagal cepat & jelas drpd macet compile tanpa gcc.
-if ! python3 -m pip install --only-binary=:all: --no-cache-dir "cryptography" 2>/tmp/crypto_err.log; then
-  echo ""
-  echo "GAGAL: tidak ada wheel binary 'cryptography' yang cocok untuk platform ini."
-  echo "Tidak ada gcc/Rust di board -> install dari source tidak mungkin tanpa toolchain."
-  echo "Detail error:"
-  cat /tmp/crypto_err.log
-  echo ""
-  echo "Opsi: (a) pasang gcc+rust dulu (butuh banyak ruang & waktu di board lemah),"
-  echo "      (b) cross-compile wheel di mesin lain lalu salin ke board,"
-  echo "      (c) ganti sink.py ke metode tunnel tanpa paramiko (mis. shell out ke /usr/bin/ssh)."
-  exit 1
-fi
-echo "    OK: wheel cryptography terpasang tanpa compiler."
+echo "==> [3/8] Pasang dependency aplikasi (versi terkunci, pure-Python — cek requirements.txt)"
+# Semua package di requirements.txt sudah dikunci ke versi yg masih pure-Python
+# & support Python 3.5 (tidak ada native extension -> tidak butuh gcc).
+"$PY_BIN" -m pip install --no-cache-dir -r "$SRC_DIR/requirements.txt"
 
-echo "==> [4/8] Pasang dependency aplikasi"
-python3 -m pip install --no-cache-dir -r "$SRC_DIR/requirements.txt"
-
-echo "==> [5/8] Zona waktu (WITA)"
+echo "==> [4/8] Zona waktu (WITA)"
 timedatectl set-timezone Asia/Makassar 2>/dev/null \
   || ln -sf /usr/share/zoneinfo/Asia/Makassar /etc/localtime
 
-echo "==> [6/8] ZeroTier (binary static, tanpa apt)"
+echo "==> [5/8] ZeroTier (binary static, tanpa apt)"
 if ! command -v zerotier-one >/dev/null 2>&1 && ! command -v zerotier-cli >/dev/null 2>&1; then
   curl -s https://install.zerotier.com | bash || {
     echo "PERINGATAN: installer resmi ZeroTier gagal (kemungkinan butuh apt/dnf/yum)."
@@ -68,10 +58,12 @@ if command -v zerotier-one >/dev/null 2>&1; then
   [[ -n "$ZT_NETWORK_ID" ]] && { zerotier-cli join "$ZT_NETWORK_ID" || true; }
 fi
 
-echo "==> [7/8] Salin aplikasi ke $APP_DIR"
+echo "==> [6/8] Salin aplikasi ke $APP_DIR"
 mkdir -p "$APP_DIR/data"
 cp -r "$SRC_DIR/tapping_box" "$APP_DIR/"
 [[ -f "$APP_DIR/config.toml" ]] || cp "$SRC_DIR/config.toml.example" "$APP_DIR/config.toml"
+
+echo "==> [7/8] Kunci SSH untuk tunnel"
 if [[ ! -f "$KEY_PATH" ]]; then
   ssh-keygen -t ed25519 -N "" -C "tapping-box@$(hostname)" -f "$KEY_PATH"
 fi
@@ -79,15 +71,15 @@ chmod 600 "$KEY_PATH" "$APP_DIR/config.toml"
 
 echo "==> [8/8] systemd service"
 cp "$SRC_DIR/tapping-box.service" /etc/systemd/system/
-sed -i "s#/opt/tapping-box/venv/bin/python#/usr/bin/python3#" /etc/systemd/system/tapping-box.service
 systemctl daemon-reload
 systemctl enable tapping-box.service
 
 cat <<MSG
 
 ============================ SELESAI ============================
-Catatan platform: Yocto sumo (bukan Ubuntu) - tanpa venv, paket Python
-terpasang global via pip langsung (tidak ada apt/venv module di image ini).
+Catatan platform: Yocto sumo, Python ${PY_VER} (EOL). Dependency dikunci
+ke versi pure-Python lama yang masih kompatibel (lihat requirements.txt).
+SSH tunnel pakai binary /usr/bin/ssh langsung (bukan paramiko).
 
 LANGKAH MANUAL WAJIB:
   1. Edit konfigurasi:        nano $APP_DIR/config.toml

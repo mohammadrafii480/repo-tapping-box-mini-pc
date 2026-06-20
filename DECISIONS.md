@@ -34,6 +34,34 @@ Keputusan "pindah ke Ubuntu" di atas **dibatalkan** setelah ditemukan fakta lapa
 | pip via get-pip.py, install global | venv | Image ini tidak punya modul `venv`/`ensurepip`; instalasi global cukup utk single-purpose daemon device. |
 | Kanari wheel `cryptography --only-binary` di installer | Asumsi langsung berhasil | glibc 2.27 di board secara teori lolos baseline manylinux2014, tapi tidak diverifikasi vendor; gagal cepat dgn pesan jelas lebih aman drpd macet compile tanpa gcc/Rust. |
 
+## Update 2: Python 3.5.5 (bukan 3.6+) — drop paramiko, rewrite syntax
+Saat instalasi nyata di board, `get-pip.py` modern menolak jalan: board punya
+**Python 3.5.5** (EOL 2020), bukan versi lebih baru yang diasumsikan. Ini
+membongkar dua asumsi sekaligus:
+- `paramiko` modern butuh Python 3.6+; versi lama yang support 3.5 juga
+  berisiko tidak dapat wheel `cryptography` yang cocok tanpa compiler.
+- Seluruh kode aplikasi (f-string, `@dataclass`) memakai sintaks 3.6+/3.7+
+  yang invalid di 3.5 — bukan cuma masalah dependency, tapi source code itu
+  sendiri harus ditulis ulang.
+
+| Keputusan (revisi 2) | Alternatif | Alasan |
+|---|---|---|
+| SSH tunnel via `subprocess` + binary `/usr/bin/ssh` (OpenSSH) | paramiko + sshtunnel | Lepas total dari masalah Python 3.5/cryptography-wheel; OpenSSH client sudah terbukti ada di board & battle-tested. |
+| Hapus f-string, ganti `.format()`/`%` di semua modul | Tetap f-string | f-string invalid syntax di Python <3.6 — bukan runtime error, tapi SyntaxError saat import. |
+| Hapus `@dataclass`, ganti `class X(object):` manual + `__slots__` | dataclasses backport package | Backport pure-Python utk 3.5 ada tapi nambah dependency tanpa perlu; class manual lebih sederhana & 0 dependency tambahan. |
+| `get-pip.py` versi terkunci (`bootstrap.pypa.io/pip/3.5/get-pip.py`) | get-pip.py generik | pip ≥21.0 pakai f-string internal, gagal SyntaxError di 3.5; perlu URL bootstrap versi-terkunci. |
+| `PyMySQL==0.10.1`, `toml==0.10.2` (versi lama dikunci) | versi terbaru | Versi terbaru PyMySQL/toml mungkin drop support 3.5 di metadata; versi lama ini pure-Python & teruji era itu. |
+| Hapus `tomllib` (stdlib 3.11+), pakai package `toml` | tomllib | tomllib tidak ada sama sekali di 3.5; perlu package eksternal pure-Python. |
+| `datetime.fromisoformat` -> `strptime` manual | fromisoformat | fromisoformat baru ada di Python 3.7+. |
+
+**Implikasi keamanan dicatat secara eksplisit**: Python 3.5 sudah EOL sejak
+2020, tidak menerima security patch. Risiko ini diterima krn tidak ada
+jalur upgrade interpreter tanpa reflash OS (lihat Update 1) yang saat ini
+tidak memungkinkan secara alat. Mitigasi: minimalkan permukaan serangan
+(SSH key-only, tidak ada listening port di board, daemon non-root jika
+memungkinkan di iterasi berikutnya).
+
+
 
 ## Asumsi (verifikasi sebelum produksi)
 1. **Skema Quinos di `config.toml` masih default tebakan** — wajib disamakan via `DESCRIBE`. Ini satu-satunya bagian yang belum terkunci pasti.

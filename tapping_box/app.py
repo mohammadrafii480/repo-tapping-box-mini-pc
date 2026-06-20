@@ -1,10 +1,12 @@
 """Orkestrasi daemon: pull -> enqueue -> push -> mark -> vacuum -> sleep.
 
 CLI:
-  python -m tapping_box run      # daemon loop (dipakai systemd)
-  python -m tapping_box once     # satu siklus lalu keluar
-  python -m tapping_box dry-run  # tarik + render, cetak, TANPA kirim
-  python -m tapping_box doctor   # cek konektivitas sumber/tunnel/pusat
+  python3 -m tapping_box run      # daemon loop (dipakai systemd)
+  python3 -m tapping_box once     # satu siklus lalu keluar
+  python3 -m tapping_box dry-run  # tarik + render, cetak, TANPA kirim
+  python3 -m tapping_box doctor   # cek konektivitas sumber/tunnel/pusat
+
+Kompatibel Python 3.5 (tanpa f-string).
 """
 from __future__ import annotations
 
@@ -16,22 +18,21 @@ import time
 from datetime import datetime
 
 import pymysql
-from sshtunnel import SSHTunnelForwarder
 
 from . import receipt, sink, source
-from .config import Config, load_config
-from .models import OutboxRecord, Transaction
+from .config import load_config
+from .models import OutboxRecord
 from .store import Store
 
 log = logging.getLogger("tapping_box")
-_running = True
+_running = [True]  # list = mutable cell, lebih aman lintas-scope drpd 'global' di handler
 
 
-def _build_record(cfg: Config, txn: Transaction) -> OutboxRecord:
+def _build_record(cfg, txn):
     text = receipt.render(txn, cfg.device.struk_header)
     data = text.encode("utf-8")
     ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    name = f"{cfg.device.nama_wp}_{ts}"[:45]  # FileName varchar(45)
+    name = (cfg.device.nama_wp + "_" + ts)[:45]  # FileName varchar(45)
     return OutboxRecord(
         pos_txn_id=txn.txn_id,
         device_id=cfg.device.npwp,
@@ -42,7 +43,7 @@ def _build_record(cfg: Config, txn: Transaction) -> OutboxRecord:
     )
 
 
-def pull(cfg: Config, store: Store) -> int:
+def pull(cfg, store):
     wm = store.get_watermark()
     after = max(0, wm - cfg.runtime.rescan_window)
     txns = source.fetch_since(cfg.source, cfg.schema, after, cfg.runtime.batch_size)
@@ -59,7 +60,7 @@ def pull(cfg: Config, store: Store) -> int:
     return new
 
 
-def push(cfg: Config, store: Store) -> int:
+def push(cfg, store):
     pending = store.pending(cfg.runtime.batch_size)
     if not pending:
         return 0
@@ -76,7 +77,7 @@ def push(cfg: Config, store: Store) -> int:
     return len(ok)
 
 
-def cycle(cfg: Config, store: Store) -> None:
+def cycle(cfg, store):
     pull(cfg, store)
     push(cfg, store)
     removed = store.vacuum_old(cfg.runtime.retention_days)
@@ -84,38 +85,37 @@ def cycle(cfg: Config, store: Store) -> None:
         log.info("retensi: %d baris lama dibersihkan", removed)
 
 
-def run_loop(cfg: Config, store: Store) -> None:
+def run_loop(cfg, store):
     log.info("daemon mulai (interval=%ds)", cfg.runtime.poll_interval_sec)
-    while _running:
+    while _running[0]:
         try:
             cycle(cfg, store)
         except Exception:
             log.exception("siklus error; lanjut siklus berikutnya")
         for _ in range(cfg.runtime.poll_interval_sec):
-            if not _running:
+            if not _running[0]:
                 break
             time.sleep(1)
     log.info("daemon berhenti")
 
 
-def dry_run(cfg: Config) -> None:
+def dry_run(cfg):
     txns = source.fetch_since(cfg.source, cfg.schema, 0, cfg.runtime.batch_size)
-    print(f"# {len(txns)} transaksi diambil (TANPA kirim)\n")
+    print("# {} transaksi diambil (TANPA kirim)\n".format(len(txns)))
     for t in txns:
         print(receipt.render(t, cfg.device.struk_header))
-        print()
+        print("")
 
 
-def doctor(cfg: Config) -> int:
-    rc = 0
+def doctor(cfg):
+    state = {"rc": 0}
 
-    def ok(label: str) -> None:
-        print(f"  [OK]   {label}")
+    def ok(label):
+        print("  [OK]   {}".format(label))
 
-    def fail(label: str, exc: Exception) -> None:
-        nonlocal rc
-        rc = 1
-        print(f"  [FAIL] {label}: {exc}")
+    def fail(label, exc):
+        state["rc"] = 1
+        print("  [FAIL] {}: {}".format(label, exc))
 
     print("Sumber (Quinos MySQL):")
     try:
@@ -123,40 +123,35 @@ def doctor(cfg: Config) -> int:
                             password=cfg.source.password, database=cfg.source.database,
                             connect_timeout=8)
         with c.cursor() as cur:
-            cur.execute(f"SELECT COUNT(*) FROM `{cfg.schema.txn_table}`")
+            cur.execute("SELECT COUNT(*) FROM `{}`".format(cfg.schema.txn_table))
             n = cur.fetchone()[0]
         c.close()
-        ok(f"{cfg.source.host}:{cfg.source.port} ({n} baris di {cfg.schema.txn_table})")
+        ok("{}:{} ({} baris di {})".format(cfg.source.host, cfg.source.port, n, cfg.schema.txn_table))
     except Exception as e:
         fail("koneksi sumber", e)
 
     print("Pusat (SSH tunnel + MySQL trumon):")
     try:
-        with SSHTunnelForwarder(
-            (cfg.ssh.host, cfg.ssh.port), ssh_username=cfg.ssh.user, ssh_pkey=cfg.ssh.key_path,
-            remote_bind_address=(cfg.ssh.remote_bind_host, cfg.ssh.remote_bind_port),
-            local_bind_address=("127.0.0.1", 0),
-        ) as t:
-            c = pymysql.connect(host="127.0.0.1", port=t.local_bind_port, user=cfg.central.user,
+        with sink.SshTunnel(cfg) as tunnel:
+            c = pymysql.connect(host="127.0.0.1", port=tunnel.local_port, user=cfg.central.user,
                                 password=cfg.central.password, database=cfg.central.database,
                                 connect_timeout=10)
             with c.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM `FileTransferStage2`")
                 n = cur.fetchone()[0]
             c.close()
-        ok(f"tunnel {cfg.ssh.host} -> trumon ({n} baris di FileTransferStage2)")
+        ok("tunnel {} -> trumon ({} baris di FileTransferStage2)".format(cfg.ssh.host, n))
     except Exception as e:
         fail("tunnel/pusat", e)
 
-    return rc
+    return state["rc"]
 
 
-def _stop(_sig: int, _frm: object) -> None:
-    global _running
-    _running = False
+def _stop(_sig, _frm):
+    _running[0] = False
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None):
     p = argparse.ArgumentParser(prog="tapping_box")
     p.add_argument("cmd", choices=["run", "once", "dry-run", "doctor"])
     p.add_argument("-c", "--config", default="/opt/tapping-box/config.toml")

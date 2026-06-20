@@ -1,15 +1,20 @@
-"""Pengirim ke pusat: buka SSH tunnel (key auth) lalu INSERT ke FileTransferStage2.
+"""Pengirim ke pusat: buka SSH tunnel via binary `ssh` (subprocess) lalu
+INSERT ke FileTransferStage2.
 
-Tunnel dibuka sekali per batch (bukan per baris). FileTime & InsertTimeStamp
-diisi NOW() di sisi MySQL pusat agar otoritatif (hindari clock-skew board).
+Kenapa bukan paramiko/sshtunnel: board target Python 3.5 (EOL), paramiko
+modern butuh 3.6+ dan tidak ada wheel `cryptography` yang aman utk
+kombinasi glibc/Python setua ini tanpa compiler. `ssh` OpenSSH sudah
+terpasang di board (/usr/bin/ssh) dan lepas total dari masalah itu.
 """
 from __future__ import annotations
 
 import logging
-from typing import List, Set
+import socket
+import subprocess
+import time
+from typing import List, Optional, Set
 
 import pymysql
-from sshtunnel import SSHTunnelForwarder
 
 from .config import Config
 from .models import OutboxRecord
@@ -26,25 +31,85 @@ _EXISTS = (
     "WHERE `DeviceId`=%s AND `FileIdentifier`=%s LIMIT 1"
 )
 
+_TUNNEL_READY_TIMEOUT_SEC = 15
+_TUNNEL_POLL_INTERVAL_SEC = 0.3
 
-def push(cfg: Config, records: List[OutboxRecord]) -> Set[str]:
+
+def _free_local_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _port_open(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+class SshTunnel(object):
+    """Context manager: buka `ssh -L local_port:remote_host:remote_port` sbg subprocess."""
+
+    def __init__(self, cfg):
+        self._cfg = cfg
+        self.local_port = _free_local_port()
+        self._proc = None  # type: Optional[subprocess.Popen]
+
+    def __enter__(self):
+        ssh = self._cfg.ssh
+        cmd = [
+            "/usr/bin/ssh",
+            "-i", ssh.key_path,
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",          # gagal cepat kalau key tidak diterima, bukan prompt password
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=10",
+            "-o", "ServerAliveCountMax=3",
+            "-N",                            # tanpa remote command, hanya forward
+            "-L", "127.0.0.1:{}:{}:{}".format(self.local_port, ssh.remote_bind_host, ssh.remote_bind_port),
+            "-p", str(ssh.port),
+            "{}@{}".format(ssh.user, ssh.host),
+        ]
+        self._proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        deadline = time.monotonic() + _TUNNEL_READY_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            if self._proc.poll() is not None:
+                _out, err = self._proc.communicate()
+                raise RuntimeError("ssh tunnel mati saat start: {}".format(err.decode("utf-8", errors="replace")))
+            if _port_open(self.local_port):
+                return self
+            time.sleep(_TUNNEL_POLL_INTERVAL_SEC)
+        self._kill()
+        raise TimeoutError("ssh tunnel tidak siap dalam {}s".format(_TUNNEL_READY_TIMEOUT_SEC))
+
+    def __exit__(self, *exc):
+        self._kill()
+
+    def _kill(self):
+        if self._proc is None or self._proc.poll() is not None:
+            return
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=5)
+
+
+def push(cfg, records):
     """Kirim batch. Kembalikan set pos_txn_id yang sukses (atau sudah ada di pusat)."""
     if not records:
         return set()
 
-    sent: Set[str] = set()
-    with SSHTunnelForwarder(
-        (cfg.ssh.host, cfg.ssh.port),
-        ssh_username=cfg.ssh.user,
-        ssh_pkey=cfg.ssh.key_path,
-        remote_bind_address=(cfg.ssh.remote_bind_host, cfg.ssh.remote_bind_port),
-        local_bind_address=("127.0.0.1", 0),
-    ) as tunnel:
+    sent = set()
+    with SshTunnel(cfg) as tunnel:
         conn = pymysql.connect(
-            host="127.0.0.1", port=tunnel.local_bind_port,
+            host="127.0.0.1", port=tunnel.local_port,
             user=cfg.central.user, password=cfg.central.password,
             database=cfg.central.database, charset="utf8mb4",
-            connect_timeout=15, write_timeout=30, autocommit=False,
+            connect_timeout=15, autocommit=False,
         )
         try:
             with conn.cursor() as cur:

@@ -1,4 +1,4 @@
-PyMySQL==1.1.1
-sshtunnel==0.4.0
-paramiko>=3.4
-tomli==2.0.1 ; python_version < "3.11"
+# Dikunci utk kompatibilitas Python 3.5 (board Yocto, EOL interpreter).
+# Semua pure-Python, tidak ada native extension -> tidak butuh gcc/Rust.
+PyMySQL==0.10.1
+toml==0.10.2
